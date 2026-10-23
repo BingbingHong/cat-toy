@@ -288,7 +288,7 @@ function updateCat(dt) {
   // 连尾巴带头都留在屏幕里（趴着睡时尾巴会伸得很长）
   if (cat.x < EDGE) { cat.x = EDGE; cat.vx = Math.max(0, cat.vx); }
   if (cat.x > W - EDGE) { cat.x = W - EDGE; cat.vx = Math.min(0, cat.vx); }
-  cat.phase += Math.abs(cat.vx) * dt / 10;
+  cat.phase += Math.abs(cat.vx) * dt / 6;   // 步频和步幅配合，着地的脚基本不打滑
   cat.fs = damp(cat.fs, cat.facing, 14, dt);
 
   // 姿态参数平滑过渡
@@ -349,7 +349,8 @@ function computeRig() {
   hip.x += wig * 2.5;
 
   const sw = Math.sin(cat.phase) * 9 * p.walk;
-  const l1 = Math.max(0, -Math.cos(cat.phase)) * 5 * p.walk, l2 = Math.max(0, Math.cos(cat.phase)) * 5 * p.walk;
+  // 脚往前摆时抬起、往后蹬时着地（+sw 的脚在 cos>0 时往前摆）
+  const l1 = Math.max(0, Math.cos(cat.phase)) * 5 * p.walk, l2 = Math.max(0, -Math.cos(cat.phase)) * 5 * p.walk;
   const lie = p.lie;
   let fN = { x: sh.x + 3 + sw + 11 * lie, y: -l1 - 3 * lie };
   let fF = { x: sh.x + 7 - sw + 9 * lie, y: -l2 - 3 * lie };
