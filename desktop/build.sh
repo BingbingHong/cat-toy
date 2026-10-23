@@ -8,6 +8,7 @@ rm -rf build
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp Info.plist "$APP/Contents/"
 cp ../cat.html "$APP/Contents/Resources/cat.html"
+cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"     # 图标由 make_icon.sh 从 icon.svg 生成
 for arch in arm64 x86_64; do
   swiftc -O main.swift -target "$arch-apple-macos12" -o "build/CatToy-$arch" -framework Cocoa -framework WebKit
 done

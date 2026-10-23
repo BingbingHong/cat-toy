@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFF4E4"/>
+      <stop offset="1" stop-color="#E9DFF4"/>
+    </linearGradient>
+    <clipPath id="tile">
+      <rect x="100" y="100" width="824" height="824" rx="185" ry="185"/>
+    </clipPath>
+    <clipPath id="head">
+      <ellipse cx="512" cy="610" rx="296" ry="256"/>
+    </clipPath>
+  </defs>
+
+  <!-- 圆角方块底 -->
+  <rect x="100" y="100" width="824" height="824" rx="185" ry="185" fill="url(#bg)"/>
+
+  <g clip-path="url(#tile)">
+    <!-- 地面阴影 -->
+    <ellipse cx="470" cy="884" rx="250" ry="30" fill="#5A3C28" fill-opacity="0.12"/>
+
+    <!-- 逗猫棒：竹竿从右边伸进来，略带弯曲 -->
+    <path d="M 1010 300 Q 900 190 780 170" fill="none" stroke="#C99A63" stroke-width="18" stroke-linecap="round"/>
+    <path d="M 905 232 L 914 222 M 850 196 L 856 184" stroke="#785028" stroke-opacity="0.35" stroke-width="5" stroke-linecap="round"/>
+    <!-- 绳子 -->
+    <path d="M 780 170 Q 778 265 792 352" fill="none" stroke="#8B7766" stroke-width="5" stroke-linecap="round"/>
+    <circle cx="780" cy="170" r="8" fill="#A07A50"/>
+    <!-- 羽毛（三片，朝下散开） -->
+    <g transform="translate(792 352) rotate(100)">
+      <g transform="rotate(-24)">
+        <path d="M 8 0 Q 60 -34 128 0 Q 60 34 8 0 Z" fill="#FF8FB1"/>
+        <path d="M 12 0 L 120 0" stroke="#FFFFFF" stroke-opacity="0.6" stroke-width="4"/>
+      </g>
+      <g transform="rotate(24)">
+        <path d="M 8 0 Q 60 -34 128 0 Q 60 34 8 0 Z" fill="#5CD6C9"/>
+        <path d="M 12 0 L 120 0" stroke="#FFFFFF" stroke-opacity="0.6" stroke-width="4"/>
+      </g>
+      <path d="M 8 0 Q 60 -34 128 0 Q 60 34 8 0 Z" fill="#FFD166"/>
+      <path d="M 12 0 L 120 0" stroke="#FFFFFF" stroke-opacity="0.6" stroke-width="4"/>
+    </g>
+    <circle cx="792" cy="352" r="15" fill="#F2B33D"/>
+    <circle cx="787" cy="347" r="5" fill="#FFFFFF" fill-opacity="0.7"/>
+
+    <!-- 小猫的脸（与 cat.html 同一套造型，放大 16 倍），整体缩放后放在左下 -->
+    <g transform="translate(470 660) scale(0.82) translate(-512 -610)">
+      <!-- 耳朵 -->
+      <path d="M 563.7 367.5 L 757.4 274 L 704.7 454 Z" fill="#F3A55B" stroke="#F3A55B" stroke-width="44" stroke-linejoin="round"/>
+      <path d="M 460.3 367.5 L 266.6 274 L 319.3 454 Z" fill="#F3A55B" stroke="#F3A55B" stroke-width="44" stroke-linejoin="round"/>
+      <path d="M 619.5 366.4 L 728.7 305.9 L 690 409.6 Z" fill="#F59AA8" stroke="#F59AA8" stroke-width="14" stroke-linejoin="round"/>
+      <path d="M 404.5 366.4 L 295.3 305.9 L 334 409.6 Z" fill="#F59AA8" stroke="#F59AA8" stroke-width="14" stroke-linejoin="round"/>
+      <!-- 头 -->
+      <ellipse cx="512" cy="610" rx="296" ry="256" fill="#F3A55B"/>
+      <!-- 额头三道花纹 -->
+      <g clip-path="url(#head)" stroke="#E27C34" stroke-width="32" stroke-linecap="round">
+        <path d="M 440 394 L 454 447"/>
+        <path d="M 512 378 L 512 437"/>
+        <path d="M 584 394 L 570 447"/>
+      </g>
+      <!-- 腮红 -->
+      <ellipse cx="376" cy="700" rx="50" ry="31" fill="#FF7887" fill-opacity="0.42"/>
+      <ellipse cx="648" cy="700" rx="50" ry="31" fill="#FF7887" fill-opacity="0.42"/>
+      <!-- 嘴套、鼻子、嘴 -->
+      <ellipse cx="512" cy="728" rx="80" ry="56" fill="#FFF3E3"/>
+      <path d="M 491 685 L 533 685 L 512 707 Z" fill="#F59AA8" stroke="#F59AA8" stroke-width="12" stroke-linejoin="round"/>
+      <path d="M 512 707 L 512 720 M 478 723 Q 495 746 512 720 Q 529 746 546 723" fill="none" stroke="#8A5A48" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+      <!-- 胡子 -->
+      <g fill="none" stroke="#6E503C" stroke-opacity="0.38" stroke-width="7" stroke-linecap="round">
+        <path d="M 563 709 Q 648 676 727 660"/>
+        <path d="M 563 722 Q 660 708 754 703"/>
+        <path d="M 563 735 Q 648 738 728 752"/>
+        <path d="M 461 709 Q 376 676 297 660"/>
+        <path d="M 461 722 Q 364 708 270 703"/>
+        <path d="M 461 735 Q 376 738 296 752"/>
+      </g>
+      <!-- 眼睛：朝右上看着羽毛 -->
+      <ellipse cx="444" cy="562" rx="58" ry="74" fill="#3B2A20"/>
+      <ellipse cx="604" cy="562" rx="58" ry="74" fill="#3B2A20"/>
+      <circle cx="432" cy="533" r="22" fill="#FFFFFF"/>
+      <circle cx="592" cy="533" r="22" fill="#FFFFFF"/>
+      <circle cx="466" cy="590" r="9" fill="#FFFFFF"/>
+      <circle cx="626" cy="590" r="9" fill="#FFFFFF"/>
+    </g>
+  </g>
+</svg>

@@ -1,3 +1,5 @@
+<img src="desktop/icon_preview.png" width="128" alt="CatToy 图标">
+
 # 逗猫 CatToy 🐾
 
 一只住在 macOS 桌面上的小猫。你的鼠标就是逗猫棒：晃一晃，它会盯着看、压低身子扭屁股、扑上来拍羽毛；不理它，它就自己舔毛、睡觉。
@@ -42,3 +44,4 @@
 
 - `cat.html`：猫和逗猫棒的全部绘制、物理和行为（浏览器、桌面共用）
 - `desktop/main.swift`：macOS 外壳，透明点击穿透窗口、全局鼠标、菜单
+- `desktop/icon.svg`：应用图标源文件，改完运行 `./desktop/make_icon.sh` 重新生成 `AppIcon.icns`
