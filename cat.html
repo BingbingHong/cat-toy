@@ -1,0 +1,802 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>逗猫原型</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #f3ede4; font-family: -apple-system, "PingFang SC", sans-serif; }
+  canvas { display: block; cursor: none; touch-action: none; }
+  #tip { position: fixed; left: 16px; top: 14px; font-size: 13px; color: #8a7a6a; pointer-events: none; user-select: none; }
+  #breeds { position: fixed; right: 16px; top: 10px; display: flex; gap: 4px; padding: 4px; background: rgba(255,255,255,0.55); border: 1px solid rgba(255,255,255,0.9); border-radius: 999px; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); box-shadow: 0 2px 10px rgba(80,60,40,0.08); }
+  #breeds button { cursor: pointer; border: 0; background: transparent; border-radius: 999px; padding: 6px 12px 6px 9px; font: 13px -apple-system, "PingFang SC", sans-serif; color: #8a7a6a; display: flex; align-items: center; gap: 6px; transition: background .15s, color .15s; }
+  #breeds button:hover { color: #3b2a20; }
+  #breeds button.on { background: #fff; color: #3b2a20; box-shadow: 0 1px 4px rgba(80,60,40,0.12); }
+  #breeds i { width: 12px; height: 12px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.12); }
+  /* 桌面模式：透明背景，界面元素交给菜单栏 */
+  html.desktop, html.desktop body { background: transparent; }
+  html.desktop #tip, html.desktop #breeds { display: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="tip">移动鼠标逗猫</div>
+<div id="breeds"></div>
+<script>
+// ---------- 基础工具 ----------
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const damp = (a, b, r, dt) => a + (b - a) * (1 - Math.exp(-r * dt));
+const rnd = (a, b) => a + Math.random() * (b - a);
+const mix = (a, b, t) => ({ x: lerp(a.x, b.x, t), y: lerp(a.y, b.y, t) });
+const approach = (v, t, d) => v < t ? Math.min(v + d, t) : Math.max(v - d, t);
+function rot(x, y, a) { const c = Math.cos(a), s = Math.sin(a); return { x: x * c - y * s, y: x * s + y * c }; }
+
+// 桌面模式由 macOS 外壳注入 window.DESKTOP；鼠标位置、地面高度、品种、开关都由外壳通过 window.catHost 传进来
+const DESKTOP = !!window.DESKTOP;
+if (DESKTOP) document.documentElement.classList.add('desktop');
+let hostGround = null, playing = true;
+
+let W, H, DPR, groundY, bgGrad;
+const S = 1.3;          // 猫的整体缩放
+function resize() {
+  DPR = Math.min(devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR;
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  groundY = hostGround != null ? hostGround : H - 64;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  bgGrad = ctx.createLinearGradient(0, 0, W, H);
+  bgGrad.addColorStop(0, '#f8efe3');
+  bgGrad.addColorStop(1, '#e7e1f2');
+}
+resize();
+addEventListener('resize', resize);
+
+// ---------- 鼠标 = 握住逗猫棒的把手 ----------
+const mouse = { x: W * 0.62, y: H * 0.42 };
+addEventListener('pointermove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+
+// ---------- 杆子：有弹性的竹竿 ----------
+// 把手跟着鼠标走；杆尖是一个弹簧点，追着“静止位置”跑，会过冲、来回颤，像真的竿子一样甩
+const ROD = 170, ROD_K = 650, ROD_C = 9;
+let rodSide = -1, rodAng = -2.5;               // rodSide：杆尖朝左(-1)还是朝右(1)，自动转向猫那一侧
+const rodTip = { x: mouse.x + Math.cos(rodAng) * ROD, y: mouse.y + Math.sin(rodAng) * ROD, vx: 0, vy: 0 };
+function rodRest(hx, hy) { return { x: hx + Math.cos(rodAng) * ROD, y: hy + Math.sin(rodAng) * ROD }; }
+function stepRod(hx, hy) {
+  const r = rodRest(hx, hy);
+  rodTip.vx += (ROD_K * (r.x - rodTip.x) - ROD_C * rodTip.vx) * SUB;
+  rodTip.vy += (ROD_K * (r.y - rodTip.y) - ROD_C * rodTip.vy + 120) * SUB;   // +120：杆尖轻微下垂
+  rodTip.x += rodTip.vx * SUB; rodTip.y += rodTip.vy * SUB;
+  // 竿子不会被拉长或压得太短
+  const dx = rodTip.x - hx, dy = rodTip.y - hy, d = Math.hypot(dx, dy) || 1, L = clamp(d, ROD * 0.8, ROD * 1.04);
+  rodTip.x = hx + dx / d * L; rodTip.y = hy + dy / d * L;
+}
+
+// ---------- 绳子：带弹性的 Verlet 物理 ----------
+const SEG = 12, SEGLEN = 8, SUB = 1 / 120, G = 1500, STIFF = 0.85, BEND = 0.12;
+const rope = [];
+for (let i = 0; i < SEG; i++) rope.push({ x: rodTip.x, y: rodTip.y + i * SEGLEN, px: rodTip.x, py: rodTip.y + i * SEGLEN });
+const feather = () => rope[SEG - 1];
+
+function stepRope(hx, hy) {
+  stepRod(hx, hy);
+  for (let i = 1; i < SEG; i++) {
+    const p = rope[i], d = i === SEG - 1 ? 0.985 : 0.992;   // 羽毛端空气阻力大一点，显得轻飘
+    const vx = (p.x - p.px) * d, vy = (p.y - p.py) * d;
+    p.px = p.x; p.py = p.y;
+    p.x += vx; p.y += vy + G * SUB * SUB;
+  }
+  const a = rope[0]; a.px = a.x; a.py = a.y; a.x = rodTip.x; a.y = rodTip.y;
+  // 约束略软，绳子能稍微拉长回弹；再加一点抗弯（隔一节保持距离），绳子不会软塌塌地乱扭
+  for (let k = 0; k < 8; k++) {
+    for (let i = 0; i < SEG - 1; i++) {
+      const p = rope[i], q = rope[i + 1];
+      const dx = q.x - p.x, dy = q.y - p.y, d = Math.hypot(dx, dy) || 0.001, df = (d - SEGLEN) / d * STIFF;
+      if (i === 0) { q.x -= dx * df; q.y -= dy * df; }
+      else { p.x += dx * df * 0.5; p.y += dy * df * 0.5; q.x -= dx * df * 0.5; q.y -= dy * df * 0.5; }
+    }
+    for (let i = 0; i < SEG - 2; i++) {
+      const p = rope[i], q = rope[i + 2];
+      const dx = q.x - p.x, dy = q.y - p.y, d = Math.hypot(dx, dy) || 0.001, min = SEGLEN * 1.75;
+      if (d >= min) continue;
+      const df = (d - min) / d * BEND;
+      if (i === 0) { q.x -= dx * df; q.y -= dy * df; }
+      else { p.x += dx * df * 0.5; p.y += dy * df * 0.5; q.x -= dx * df * 0.5; q.y -= dy * df * 0.5; }
+    }
+  }
+  // 拉伸有极限：每节最多拉长到 1.15 倍，从根部往外硬性收回
+  for (let i = 0; i < SEG - 1; i++) {
+    const p = rope[i], q = rope[i + 1];
+    const dx = q.x - p.x, dy = q.y - p.y, d = Math.hypot(dx, dy), max = SEGLEN * 1.15;
+    if (d > max) { q.x = p.x + dx / d * max; q.y = p.y + dy / d * max; }
+  }
+  for (let i = 1; i < SEG; i++) {
+    const p = rope[i];
+    if (p.y > groundY - 3) { p.y = groundY - 3; p.px = lerp(p.px, p.x, 0.3); }
+  }
+}
+function kick(vx, vy) {
+  for (let i = SEG - 5; i < SEG; i++) {
+    const w = (i - (SEG - 6)) / 5, p = rope[i];
+    p.px = p.x - vx * SUB * w; p.py = p.y - vy * SUB * w;
+  }
+}
+
+// ---------- 感知：猫看到的是 0.2 秒前的羽毛（反应延迟） ----------
+const REACT = 0.2;
+const hist = [];
+let perc = { x: 0, y: 0 }, pvel = { x: 0, y: 0 }, fspeed = 0, interest = 0, fatigue = 0;
+function sampleAt(t) {
+  for (let i = hist.length - 1; i >= 0; i--) if (hist[i].t <= t) return hist[i];
+  return hist[0];
+}
+
+// ---------- 猫 ----------
+const GRAV = 2400, EDGE = 120;   // EDGE：猫中心离屏幕左右边缘的最小距离
+const cat = {
+  x: W * 0.32, y: 0, vx: 0, vy: 0, facing: 1, fs: 1,
+  state: 'IDLE', timer: 0, think: 0, st: 0, sub: 'sit', idle: 0, phase: 0,
+  turnCd: 0, contact: false, contactCd: 0, batPh: 0, bored: 0,
+  blink: 3, blinkT: 0, bubble: null, zT: 0, away: 1,
+  tl: { x: 40, y: -60 }, eyeAng: 0, eyeLook: 0, rig: null,
+};
+const pose = {
+  sit: 1, crouch: 0, lie: 0, air: 0, groom: 0, bat: 0, wiggle: 0, squash: 0,
+  excite: 0, eye: 1, ear: 0, walk: 0, airAng: 0, headAng: 0,
+  tb: 4.18, tc: 0.09, ta: 0.18, tf: 1.6, tt: 0,
+};
+// 尾巴情绪：[基础角度, 卷曲, 摆幅, 频率, 尾尖抽动]
+const TAIL = {
+  relaxed: [4.18, 0.09, 0.18, 1.6, 0],
+  alert:   [4.35, 0.05, 0.08, 2.2, 0.7],
+  hunt:    [2.95, 0.03, 0.05, 3.0, 1.0],
+  air:     [3.25, 0.02, 0.12, 5.0, 0.2],
+  sleep:   [2.70, -0.2, 0.03, 0.8, 0],
+  happy:   [4.00, 0.12, 0.30, 1.2, 0],
+};
+
+function setState(s, t) { cat.state = s; cat.timer = t || 0; cat.st = 0; }
+function faceTo(dx) {
+  const d = Math.sign(dx);
+  if (d && d !== cat.facing && cat.turnCd <= 0) { cat.facing = d; cat.turnCd = 0.4; }
+}
+function notice(ch) { cat.bubble = { ch: ch || '!', t: 0 }; setState('WATCH'); cat.think = rnd(0.25, 0.45); cat.idle = 0; }
+function toWorld(p) { return { x: cat.x + p.x * S * cat.fs, y: groundY - cat.y + p.y * S }; }
+
+function decide(dx, adx, h, drive) {
+  if (drive < 0.18) return;
+  if (adx > 180) { setState('CHASE'); return; }
+  if (h > 330) return;                                   // 太高够不着，只能干瞪眼
+  if (adx < 85 && h < 100 && fspeed > 50 && Math.random() < 0.55) { setState('BAT', rnd(0.7, 1.4)); cat.batPh = -Math.PI / 2; return; }
+  if (fspeed < 180 && Math.random() < 0.55) { setState('CROUCH', rnd(0.45, 1.2)); return; }  // 等羽毛慢下来才扑
+}
+
+function pounce() {
+  const tx = perc.x + pvel.x * 0.2, ty = perc.y + pvel.y * 0.2;   // 预判一点点
+  const ht = clamp(groundY - ty, 0, 340);
+  const apex = clamp(ht - 45, 14, 270);
+  const vy = Math.sqrt(2 * GRAV * apex), tUp = vy / GRAV;
+  let d = tx - cat.x; const dir = Math.sign(d) || cat.facing; d -= dir * 30;
+  cat.vx = clamp(d / (tUp * 1.1), -820, 820); cat.vy = vy; cat.facing = dir;
+  cat.contact = false; fatigue += 0.09;
+  setState('POUNCE');
+}
+
+function updateCat(dt) {
+  const f = feather();
+  const dx = perc.x - cat.x, adx = Math.abs(dx), h = groundY - perc.y, drive = interest - fatigue;
+  cat.st += dt; cat.timer -= dt; cat.think -= dt; cat.turnCd -= dt; cat.contactCd -= dt;
+  const P = { sit: 0, crouch: 0, lie: 0, air: 0, groom: 0, bat: 0, wiggle: 0, squash: 0, excite: clamp(drive * 1.3, 0, 1), eye: 1, ear: 0, look: 1 };
+  let tail = 'alert', tvx = 0;
+
+  switch (cat.state) {
+    case 'IDLE':
+      cat.idle += dt; P.sit = 1; P.look = 0.35; P.excite = 0; tail = 'relaxed';
+      if (cat.timer <= 0) {
+        const r = Math.random();
+        if (r < 0.4) {
+          // 自己溜达：挑一个点慢慢走过去，靠近屏幕边缘时往中间走
+          let dir = Math.random() < 0.5 ? -1 : 1;
+          if (cat.x < EDGE + 200) dir = 1; else if (cat.x > W - EDGE - 200) dir = -1;
+          cat.wx = clamp(cat.x + dir * rnd(150, 500), EDGE, W - EDGE);
+          cat.sub = 'walk'; cat.timer = 12;
+        } else if (r < 0.7) { cat.sub = 'groom'; cat.timer = rnd(2, 3.5); }
+        else { cat.sub = 'sit'; cat.timer = rnd(3, 6); }
+      }
+      if (cat.sub === 'walk') {
+        const wdx = cat.wx - cat.x;
+        faceTo(wdx); P.sit = 0; P.look = 0; tvx = Math.sign(wdx) * 55;
+        if (Math.abs(wdx) < 8) { cat.sub = 'sit'; cat.timer = rnd(2, 5); }
+      }
+      if (cat.sub === 'groom') { P.groom = 1; P.eye = 0; P.look = 0; tail = 'happy'; }
+      if (cat.idle > 25 && cat.sub !== 'walk') setState('SLEEP', rnd(20, 45));
+      else if (drive > 0.22) notice();
+      break;
+
+    case 'SLEEP':
+      P.lie = 1; P.eye = 0; P.look = 0; P.excite = 0; tail = 'sleep';
+      cat.zT -= dt; if (cat.zT <= 0) { cat.zT = 1.4; spawnZ(); }
+      if (drive > 0.5) { notice('?'); cat.think = 0.7; }    // 睡着了更难叫醒
+      else if (cat.timer <= 0) { setState('IDLE', rnd(1, 3)); cat.sub = 'sit'; cat.idle = 0; }   // 睡够了自己醒
+      break;
+
+    case 'WATCH': {
+      faceTo(adx > 25 ? dx : 0);
+      const relaxed = fspeed < 30 || adx > 220 || h > 260;
+      P.sit = relaxed ? 1 : 0; P.crouch = relaxed ? 0 : 0.35; P.ear = -0.15; tail = 'alert';
+      if (drive < 0.08) {
+        cat.bored += dt;
+        if (cat.bored > 1.5) { cat.bored = 0; setState('IDLE', rnd(2, 4)); cat.sub = 'sit'; }
+      } else cat.bored = 0;
+      if (fatigue > 0.6) {
+        setState('BORED', rnd(4, 7));
+        cat.away = cat.x < 140 ? 1 : cat.x > W - 140 ? -1 : (-Math.sign(dx) || -cat.facing);
+        cat.facing = cat.away; cat.bubble = { ch: '…', t: 0 };
+        break;
+      }
+      if (cat.think <= 0) { cat.think = rnd(0.12, 0.32); decide(dx, adx, h, drive); }
+      break;
+    }
+
+    case 'CHASE': {
+      faceTo(dx);
+      const run = adx > 320;
+      tvx = Math.sign(dx) * (run ? 290 : 80);
+      P.crouch = run ? 0.05 : 0.75; P.ear = -0.2; tail = run ? 'relaxed' : 'hunt';
+      if (adx < 140) { setState('WATCH'); cat.think = rnd(0.05, 0.2); }
+      else if (drive < 0.12) { setState('IDLE', rnd(2, 4)); cat.sub = 'sit'; }
+      break;
+    }
+
+    case 'CROUCH':
+      faceTo(dx);
+      P.crouch = 1; P.wiggle = cat.st > 0.25 ? 1 : 0; P.ear = -0.3; P.excite = 1; tail = 'hunt';
+      if (adx > 260) setState('CHASE');
+      else if (cat.timer <= 0) pounce();
+      break;
+
+    case 'POUNCE':
+      P.air = 1; P.excite = 1; P.ear = 0.35; tail = 'air';
+      cat.vy -= GRAV * dt; cat.y += cat.vy * dt; cat.x += cat.vx * dt;
+      if (cat.y <= 0 && cat.vy < 0) { cat.y = 0; cat.vy = 0; cat.vx *= 0.25; setState('LAND', 0.22); }
+      break;
+
+    case 'LAND':
+      P.crouch = 0.6; P.squash = cat.timer > 0.08 ? 1 : 0;
+      if (cat.timer <= 0) { setState('WATCH'); cat.think = rnd(0.2, 0.5); }
+      break;
+
+    case 'BAT':
+      faceTo(dx);
+      P.bat = 1; P.crouch = 0.3; P.excite = 1; tail = 'hunt';
+      cat.batPh += dt * 11;
+      if (cat.timer <= 0) { setState('WATCH'); cat.think = rnd(0.2, 0.4); }
+      break;
+
+    case 'BORED':
+      interest = Math.min(interest, 0.05); P.excite = 0; P.look = 0;
+      if (cat.st < 1.4) { tvx = cat.away * 70; tail = 'relaxed'; }
+      else { P.sit = 1; P.groom = 1; P.eye = 0; tail = 'happy'; }
+      if (cat.timer <= 0) { setState('IDLE', rnd(2, 4)); cat.sub = 'sit'; }
+      break;
+  }
+
+  // 地面移动：有加速度上限，不是瞬移
+  if (cat.state !== 'POUNCE') { cat.vx = approach(cat.vx, tvx, 900 * dt); cat.x += cat.vx * dt; }
+  // 连尾巴带头都留在屏幕里（趴着睡时尾巴会伸得很长）
+  if (cat.x < EDGE) { cat.x = EDGE; cat.vx = Math.max(0, cat.vx); }
+  if (cat.x > W - EDGE) { cat.x = W - EDGE; cat.vx = Math.min(0, cat.vx); }
+  cat.phase += Math.abs(cat.vx) * dt / 10;
+  cat.fs = damp(cat.fs, cat.facing, 14, dt);
+
+  // 姿态参数平滑过渡
+  for (const k of ['sit', 'crouch', 'lie', 'air', 'groom', 'bat', 'wiggle', 'squash', 'excite', 'eye', 'ear']) {
+    const r = k === 'air' ? 16 : k === 'squash' ? 25 : k === 'eye' ? 14 : 8;
+    pose[k] = damp(pose[k], P[k], r, dt);
+  }
+  pose.walk = damp(pose.walk, clamp(Math.abs(cat.vx) / 70, 0, 1), 10, dt);
+  pose.airAng = clamp(-Math.atan2(cat.vy, Math.abs(cat.vx) + 250) * 0.8, -0.7, 0.6);
+  const tp = TAIL[tail];
+  pose.tb = damp(pose.tb, tp[0], 4, dt); pose.tc = damp(pose.tc, tp[1], 4, dt);
+  pose.ta = damp(pose.ta, tp[2], 4, dt); pose.tf = damp(pose.tf, tp[3], 4, dt); pose.tt = damp(pose.tt, tp[4], 4, dt);
+
+  // 头和眼睛跟随真实羽毛（不延迟，眼神更灵）
+  cat.tl = { x: (f.x - cat.x) / (S * cat.facing), y: (f.y - (groundY - cat.y)) / S };
+  const hd = cat.rig ? cat.rig.head : { x: 30, y: -50 };
+  const ddx = cat.tl.x - hd.x, ddy = cat.tl.y - hd.y;
+  let hT = clamp(Math.atan2(ddy, Math.max(Math.abs(ddx), 12)) * 0.65, -0.75, 0.45) * P.look;
+  if (P.groom) hT = 0.45;
+  if (P.lie) hT = 0.25;
+  pose.headAng = damp(pose.headAng, hT, 7, dt);
+  cat.eyeAng = Math.atan2(ddy, ddx);
+  cat.eyeLook = damp(cat.eyeLook, Math.max(P.look, 0.3), 6, dt);
+
+  cat.blink -= dt; cat.blinkT -= dt;
+  if (cat.blink <= 0) { cat.blinkT = 0.13; cat.blink = rnd(2, 5); }
+
+  cat.rig = computeRig();
+
+  // 爪子碰到羽毛 → 把羽毛拍飞
+  if ((cat.state === 'POUNCE' && !cat.contact) || (cat.state === 'BAT' && cat.contactCd <= 0)) {
+    for (const pw of [cat.rig.fN, cat.rig.fF]) {
+      const w = toWorld(pw);
+      if (Math.hypot(w.x - f.x, w.y - f.y) < 24) {
+        cat.contact = true; cat.contactCd = 0.4;
+        kick(cat.facing * rnd(150, 380), -rnd(300, 650));
+        sparkle(f.x, f.y);
+        interest = Math.min(1, interest + 0.12);
+        break;
+      }
+    }
+  }
+  if (cat.bubble) { cat.bubble.t += dt; if (cat.bubble.t > 1.1) cat.bubble = null; }
+}
+
+// ---------- 骨架：所有部位的位置（猫的本地坐标，面朝右，y 向上为负） ----------
+function computeRig() {
+  const p = pose;
+  const wig = Math.sin(performance.now() / 1000 * 17) * p.wiggle;
+  const bob = Math.abs(Math.sin(cat.phase)) * 1.6 * p.walk;
+  const ang = -0.5 * p.sit * (1 - p.lie) + p.airAng * p.air + 0.08 * p.wiggle + wig * 0.035;
+  const cx = -5 * p.sit * (1 - p.lie);
+  const cy = -(30 - 11 * p.crouch - 14 * p.lie + 2 * p.air) + 4 * p.squash - bob;
+  const rx = 29 + 7 * p.air - 3 * p.sit + 4 * p.squash;
+  const ry = 15.5 - 2.5 * p.air - 3 * p.squash + 1.5 * p.lie;
+  const R = (x, y) => { const r = rot(x, y, ang); return { x: cx + r.x, y: cy + r.y }; };
+  const sh = R(18, 7), hip = R(-19, 7);
+  hip.x += wig * 2.5;
+
+  const sw = Math.sin(cat.phase) * 9 * p.walk;
+  const l1 = Math.max(0, -Math.cos(cat.phase)) * 5 * p.walk, l2 = Math.max(0, Math.cos(cat.phase)) * 5 * p.walk;
+  const lie = p.lie;
+  let fN = { x: sh.x + 3 + sw + 11 * lie, y: -l1 - 3 * lie };
+  let fF = { x: sh.x + 7 - sw + 9 * lie, y: -l2 - 3 * lie };
+  let bN = { x: hip.x - 1 - sw + 11 * p.sit + 6 * lie, y: -l2 - 3 * lie };
+  let bF = { x: hip.x + 3 + sw + 9 * p.sit + 4 * lie, y: -l1 - 3 * lie };
+  if (p.air > 0.001) {
+    const a1 = rot(25, 0, ang - 0.45), a2 = rot(24, 0, ang - 0.2), b1 = rot(24, 0, ang + 2.55), b2 = rot(23, 0, ang + 2.75);
+    fN = mix(fN, { x: sh.x + a1.x, y: sh.y + a1.y }, p.air);
+    fF = mix(fF, { x: sh.x + a2.x, y: sh.y + a2.y }, p.air);
+    bN = mix(bN, { x: hip.x + b1.x, y: hip.y + b1.y }, p.air);
+    bF = mix(bF, { x: hip.x + b2.x, y: hip.y + b2.y }, p.air);
+  }
+
+  const neck = R(22, -6), hr = rot(9, -13, ang * 0.4);
+  const head = { x: neck.x + hr.x + 5 * p.crouch + 7 * lie + 2 * p.groom, y: neck.y + hr.y + 5 * p.crouch + 11 * lie + 5 * p.groom };
+
+  if (p.groom > 0.01) {
+    const m = rot(12, 8, p.headAng);
+    fN = mix(fN, { x: head.x + m.x, y: head.y + m.y + 3 + Math.sin(performance.now() / 1000 * 9) * 2.5 }, p.groom);
+  }
+  if (p.bat > 0.01) {
+    const dx = cat.tl.x - sh.x, dy = cat.tl.y - sh.y, d = Math.hypot(dx, dy) || 1, L = Math.min(d, 38);
+    const s = (Math.sin(cat.batPh) * 0.5 + 0.5) * p.bat;
+    fN = mix(fN, { x: sh.x + dx / d * L, y: sh.y + dy / d * L }, s);
+  }
+
+  const t = performance.now() / 1000;
+  const tr = R(-27, -3), tail = [tr];
+  let x = tr.x, y = tr.y;
+  for (let i = 0; i < 11; i++) {
+    const k = i / 10;
+    const a = p.tb + ang * 0.6 + i * p.tc
+      + p.ta * Math.sin(t * p.tf - i * 0.45) * (0.3 + k)
+      + p.tt * k * k * Math.sin(t * 14 + i * 0.3) * 0.5 * Math.max(0, Math.sin(t * 1.9));
+    x += Math.cos(a) * 5.2; y = Math.min(y + Math.sin(a) * 5.2, -3);
+    tail.push({ x, y });
+  }
+  return { ang, cx, cy, rx, ry, sh, hip, fN, fF, bN, bF, head, tail };
+}
+
+// ---------- 粒子 ----------
+const parts = [];
+function sparkle(x, y) {
+  const cs = ['#FFD166', '#FF8FB1', '#5CD6C9'];
+  for (let i = 0; i < 8; i++) {
+    const a = rnd(0, Math.PI * 2), s = rnd(60, 190);
+    parts.push({ k: 'star', x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 60, life: 0, max: rnd(0.4, 0.75), c: cs[i % 3] });
+  }
+}
+function spawnZ() {
+  const w = toWorld(cat.rig.head);
+  parts.push({ k: 'z', x: w.x + 12 * cat.facing, y: w.y - 16, vx: 12 * cat.facing, vy: -22, life: 0, max: 2.2, s: rnd(11, 15) });
+}
+function updateParts(dt) {
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i];
+    p.life += dt; p.x += p.vx * dt; p.y += p.vy * dt;
+    if (p.k === 'star') { p.vy += 300 * dt; p.vx *= 0.96; }
+    if (p.life > p.max) parts.splice(i, 1);
+  }
+}
+
+// ---------- 绘制 ----------
+const C = { dark: '#E0843E', stripe: '#E27C34', cream: '#FFF3E3', creamFar: '#EEDFCB', pink: '#F59AA8', eye: '#3B2A20' };
+
+// ---------- 品种：配色 + 花斑（花斑是椭圆 [x, y, rx, ry, 颜色]，会裁剪在身体/头的轮廓里） ----------
+const OR = '#F3A55B', BK = '#2F2A2B', WH = '#FFFBF5';
+const BREEDS = {
+  orange: {
+    name: '橘猫', dot: OR, body: OR, far: '#DD8A46', haunch: OR, ears: [OR, OR], stripes: true,
+    tail: i => i > 7 ? C.dark : OR, bodyPatches: [], headPatches: [],
+  },
+  cow: {
+    name: '奶牛猫', dot: `linear-gradient(90deg, ${BK} 50%, #fff 50%)`, body: WH, far: '#E6DED3', haunch: BK, ears: [BK, BK], stripes: false,
+    tail: () => BK,
+    bodyPatches: [[-6, -9, 15, 10, BK], [16, -12, 7, 6, BK]],
+    headPatches: [[0, -16, 22, 9, BK], [3.5, -8.5, 2.2, 5, WH]],   // 黑色头顶 + 白色鼻梁
+  },
+  calico: {
+    name: '三花', dot: `conic-gradient(${OR} 0 33%, ${BK} 0 66%, #fff 0)`, body: WH, far: '#E6DED3', haunch: BK, ears: [OR, BK], stripes: false,
+    tail: i => (i >= 4 && i <= 5) || i >= 9 ? BK : OR,
+    bodyPatches: [[8, -10, 13, 9, OR], [-14, -8, 12, 10, BK], [-2, -14, 6, 5, OR]],
+    headPatches: [[-9, -12, 12, 9, OR], [12, -14, 9, 7, BK]],
+  },
+};
+let B = BREEDS.orange;
+function fillPatches(list) {
+  for (const [x, y, rx, ry, c] of list) { ctx.fillStyle = c; ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2); ctx.fill(); }
+}
+
+function drawLeg(j, f, col, paw) {
+  ctx.strokeStyle = col; ctx.lineWidth = 8; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(j.x, j.y); ctx.lineTo(f.x, f.y); ctx.stroke();
+  ctx.fillStyle = paw;
+  ctx.beginPath(); ctx.ellipse(f.x + 0.8, f.y, 5.4, 3.8, 0, 0, Math.PI * 2); ctx.fill();
+}
+
+// side: -1 左耳 / 1 右耳，两只耳朵绕头顶中轴镜像；pose.ear > 0 时一起往外压（飞机耳）
+function drawEar(side) {
+  const a = -Math.PI / 2 + 0.06 + side * 0.5;
+  const tilt = side * (0.08 + pose.ear * 0.5);
+  const b1 = rot(15.5, 0, a - 0.34), b2 = rot(15.5, 0, a + 0.34), tip = rot(25, 0, a + tilt);
+  const ec = B.ears[side < 0 ? 0 : 1];
+  ctx.fillStyle = ec; ctx.strokeStyle = ec; ctx.lineWidth = 3; ctx.lineJoin = 'round';
+  ctx.beginPath(); ctx.moveTo(b1.x, b1.y); ctx.lineTo(tip.x, tip.y); ctx.lineTo(b2.x, b2.y); ctx.closePath(); ctx.fill(); ctx.stroke();
+  const cxm = (b1.x + b2.x + tip.x) / 3, cym = (b1.y + b2.y + tip.y) / 3, s = 0.5;
+  ctx.fillStyle = C.pink;
+  ctx.beginPath();
+  ctx.moveTo(lerp(cxm, b1.x, s), lerp(cym, b1.y, s));
+  ctx.lineTo(lerp(cxm, tip.x, s + 0.15), lerp(cym, tip.y, s + 0.15));
+  ctx.lineTo(lerp(cxm, b2.x, s), lerp(cym, b2.y, s));
+  ctx.closePath(); ctx.fill();
+}
+
+function drawHead(r) {
+  const p = pose;
+  ctx.save(); ctx.translate(r.head.x, r.head.y); ctx.rotate(p.headAng);
+  drawEar(-1); drawEar(1);
+  // 头做成横向略宽的椭圆，脸蛋更圆鼓
+  ctx.fillStyle = B.body;
+  ctx.beginPath(); ctx.ellipse(0, 0, 18.5, 16, 0, 0, Math.PI * 2); ctx.fill();
+  // 头部花斑 + 额头三道短花纹，裁剪在头的轮廓内
+  ctx.save();
+  ctx.clip();
+  fillPatches(B.headPatches);
+  if (B.stripes) {
+    ctx.strokeStyle = C.stripe; ctx.lineWidth = 2; ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(-1.5, -13.5); ctx.lineTo(-0.6, -10.2);
+    ctx.moveTo(3, -14.5); ctx.lineTo(3, -10.8);
+    ctx.moveTo(7.5, -13.5); ctx.lineTo(6.6, -10.2);
+    ctx.stroke();
+  }
+  ctx.restore();
+  // 五官以 FX 为中轴左右对称，整体放低、靠拢（婴儿脸比例）
+  const FX = 6.5;
+  // 腮红
+  ctx.fillStyle = 'rgba(255,120,135,0.42)';
+  for (const side of [1, -1]) { ctx.beginPath(); ctx.ellipse(FX + side * 8.5, 5.6, 3, 1.9, 0, 0, Math.PI * 2); ctx.fill(); }
+  // 小嘴套、小鼻子、ω 嘴
+  ctx.fillStyle = C.cream;
+  ctx.beginPath(); ctx.ellipse(FX, 7.4, 4.8, 3.4, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = C.pink; ctx.strokeStyle = C.pink; ctx.lineWidth = 1; ctx.lineJoin = 'round';
+  ctx.beginPath(); ctx.moveTo(FX - 1.3, 4.7); ctx.lineTo(FX + 1.3, 4.7); ctx.lineTo(FX, 6.1); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.strokeStyle = '#8a5a48'; ctx.lineWidth = 0.9; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(FX, 6.1); ctx.lineTo(FX, 6.9);
+  ctx.moveTo(FX - 2, 7); ctx.quadraticCurveTo(FX - 1, 8.4, FX, 6.9); ctx.quadraticCurveTo(FX + 1, 8.4, FX + 2, 7);
+  ctx.stroke();
+  // 胡子：嘴套两侧各三根，镜像对称，细、微弯、呈扇形，兴奋时往前竖
+  const wt = performance.now() / 1000, fwd = p.excite * 0.12;
+  ctx.lineWidth = 0.7; ctx.strokeStyle = 'rgba(110,80,60,0.3)';
+  [[-0.3, 6.2], [-0.1, 7], [0.1, 7.8]].forEach(([a0, y0], i) => {
+    const a = a0 - fwd + Math.sin(wt * 2.2 + i) * 0.03, len = 12 - Math.abs(i - 1) * 1.5;
+    for (const side of [1, -1]) {
+      const x0 = FX + side * 3.2;
+      const ex = x0 + side * Math.cos(a) * len, ey = y0 + Math.sin(a) * len;
+      ctx.beginPath(); ctx.moveTo(x0, y0); ctx.quadraticCurveTo((x0 + ex) / 2, (y0 + ey) / 2 - 1.2, ex, ey + 0.8); ctx.stroke();
+    }
+  });
+  // 眼睛
+  const open = p.eye * (cat.blinkT > 0 ? 0.08 : 1);
+  const la = cat.eyeAng - p.headAng;
+  const px = Math.cos(la) * 1.7 * cat.eyeLook, py = Math.sin(la) * 1.5 * cat.eyeLook;
+  for (const e of [{ x: FX - 5, y: -2.5, s: 0.92 }, { x: FX + 5, y: -2.5, s: 0.92 }]) {
+    if (open < 0.18) {
+      ctx.strokeStyle = C.eye; ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      if (p.groom > 0.5) ctx.arc(e.x, e.y + 1.5, 3 * e.s, Math.PI * 1.15, Math.PI * 1.85);   // ^ ^ 舒服
+      else ctx.arc(e.x, e.y - 1, 3 * e.s, Math.PI * 0.15, Math.PI * 0.85);                  // ‿ 睡着
+      ctx.stroke();
+    } else {
+      const rx = (3.0 + 1.3 * p.excite) * e.s, ry = (4.1 + 0.9 * p.excite) * e.s * open;
+      ctx.fillStyle = C.eye;
+      ctx.beginPath(); ctx.ellipse(e.x + px * e.s, e.y + py, rx, ry, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(e.x + px * e.s - 1.1, e.y + py - 1.6 * open, 1.25 * e.s, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
+function drawCat() {
+  const r = cat.rig;
+  // 地面阴影
+  const sh = 1 - Math.min(cat.y / 260, 0.65);
+  ctx.fillStyle = 'rgba(90,60,40,0.13)';
+  ctx.beginPath(); ctx.ellipse(cat.x, groundY + 1, 36 * S * sh, 5 * sh, 0, 0, Math.PI * 2); ctx.fill();
+
+  ctx.save();
+  ctx.translate(cat.x, groundY - cat.y);
+  ctx.scale(S * cat.fs, S);
+  // 远侧腿
+  drawLeg(r.sh, r.fF, B.far, C.creamFar);
+  drawLeg(r.hip, r.bF, B.far, C.creamFar);
+  // 尾巴
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  for (let i = 0; i < r.tail.length - 1; i++) {
+    const a = r.tail[i], b = r.tail[i + 1];
+    ctx.strokeStyle = B.tail(i);
+    ctx.lineWidth = lerp(8, 5.5, i / r.tail.length);
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  }
+  // 大腿
+  ctx.fillStyle = B.haunch;
+  ctx.beginPath(); ctx.ellipse(r.hip.x, r.hip.y - 2, 13, 12, 0, 0, Math.PI * 2); ctx.fill();
+  // 身体 + 白肚皮 + 花斑 / 条纹
+  ctx.save();
+  ctx.translate(r.cx, r.cy); ctx.rotate(r.ang);
+  ctx.beginPath(); ctx.ellipse(0, 0, r.rx, r.ry, 0, 0, Math.PI * 2);
+  ctx.fillStyle = B.body; ctx.fill();
+  ctx.clip();
+  ctx.fillStyle = C.cream;
+  ctx.beginPath(); ctx.ellipse(r.rx * 0.35, r.ry * 0.85, r.rx * 0.7, r.ry * 0.55, 0, 0, Math.PI * 2); ctx.fill();
+  fillPatches(B.bodyPatches);
+  if (B.stripes) {
+    ctx.strokeStyle = C.stripe; ctx.lineWidth = 4; ctx.lineCap = 'round';
+    for (const s of [-16, -6, 4]) {
+      ctx.beginPath(); ctx.moveTo(s - 3, -r.ry - 2); ctx.quadraticCurveTo(s + 2.5, -r.ry * 0.45, s - 0.5, -r.ry * 0.05); ctx.stroke();
+    }
+  }
+  ctx.restore();
+  // 大腿条纹
+  if (B.stripes) {
+    ctx.strokeStyle = C.stripe; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(r.hip.x + 2, r.hip.y - 2, 7, Math.PI * 1.1, Math.PI * 1.6); ctx.stroke();
+  }
+  // 近侧腿
+  drawLeg(r.hip, r.bN, B.body, C.cream);
+  drawLeg(r.sh, r.fN, B.body, C.cream);
+  drawHead(r);
+  ctx.restore();
+}
+
+function drawBubble() {
+  const b = cat.bubble; if (!b) return;
+  const w = toWorld({ x: cat.rig.head.x, y: cat.rig.head.y - 30 });
+  const s = b.t < 0.15 ? (b.t / 0.15) * 1.15 : b.t < 0.25 ? lerp(1.15, 1, (b.t - 0.15) / 0.1) : 1;
+  ctx.save();
+  ctx.globalAlpha = b.t > 0.8 ? 1 - (b.t - 0.8) / 0.3 : 1;
+  ctx.translate(w.x, w.y); ctx.scale(s, s);
+  ctx.fillStyle = '#fff'; ctx.shadowColor = 'rgba(0,0,0,0.12)'; ctx.shadowBlur = 6;
+  ctx.beginPath(); ctx.arc(0, 0, 12, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = C.dark; ctx.font = 'bold 16px -apple-system, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(b.ch, 0, 1);
+  ctx.restore();
+}
+
+function drawParts() {
+  for (const p of parts) {
+    const a = 1 - p.life / p.max;
+    ctx.globalAlpha = Math.max(0, a);
+    if (p.k === 'star') {
+      ctx.fillStyle = p.c; ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.life * 6);
+      const r = 4.5 * a + 1.5;
+      ctx.beginPath();
+      for (let i = 0; i < 8; i++) { const rr = i % 2 ? r * 0.38 : r, an = i * Math.PI / 4; ctx.lineTo(Math.cos(an) * rr, Math.sin(an) * rr); }
+      ctx.closePath(); ctx.fill(); ctx.restore();
+    } else {
+      ctx.fillStyle = '#9b8bb5'; ctx.font = `600 ${p.s}px -apple-system, sans-serif`;
+      ctx.fillText('z', p.x + Math.sin(p.life * 3) * 4, p.y);
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawWand(T) {
+  // 鼠标握在把手中间；竿子从把手直着伸出去，再弯向弹簧杆尖（二次贝塞尔）
+  const ca = Math.cos(rodAng), sa = Math.sin(rodAng), nx = -sa, ny = ca;
+  const bx = mouse.x - ca * 22, by = mouse.y - sa * 22;            // 把手末端在鼠标后面一点
+  const cx = mouse.x + ca * ROD * 0.5, cy = mouse.y + sa * ROD * 0.5;
+  const tx = rodTip.x, ty = rodTip.y;
+  const bez = t => ({
+    x: (1 - t) * (1 - t) * bx + 2 * (1 - t) * t * cx + t * t * tx,
+    y: (1 - t) * (1 - t) * by + 2 * (1 - t) * t * cy + t * t * ty,
+  });
+  ctx.lineCap = 'round'; ctx.strokeStyle = '#C99A63';
+  const N = 14;
+  for (let i = 0; i < N; i++) {
+    const p = bez(i / N), q = bez((i + 1) / N);
+    ctx.lineWidth = lerp(5.5, 1.8, i / N);
+    ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y); ctx.stroke();
+  }
+  // 竹节
+  ctx.strokeStyle = 'rgba(120,80,40,0.35)'; ctx.lineWidth = 1;
+  for (const t of [0.45, 0.65, 0.82]) {
+    const p = bez(t), q = bez(t + 0.01), dx = q.x - p.x, dy = q.y - p.y, d = Math.hypot(dx, dy) || 1, w = lerp(3, 1.4, t);
+    ctx.beginPath(); ctx.moveTo(p.x - dy / d * w, p.y + dx / d * w); ctx.lineTo(p.x + dy / d * w, p.y - dx / d * w); ctx.stroke();
+  }
+  // 握把（缠绳），鼠标就在这里
+  const gx = mouse.x + ca * 26, gy = mouse.y + sa * 26;
+  ctx.strokeStyle = '#D0603F'; ctx.lineWidth = 9;
+  ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(gx, gy); ctx.stroke();
+  ctx.strokeStyle = 'rgba(120,40,20,0.35)'; ctx.lineWidth = 1.2;
+  for (let i = 1; i < 7; i++) {
+    const t = i / 7, x = lerp(bx, gx, t), y = lerp(by, gy, t);
+    ctx.beginPath(); ctx.moveTo(x + nx * 4.5 - ca * 2, y + ny * 4.5 - sa * 2); ctx.lineTo(x - nx * 4.5 + ca * 2, y - ny * 4.5 + sa * 2); ctx.stroke();
+  }
+  // 绳子
+  ctx.strokeStyle = '#8B7766'; ctx.lineWidth = 1.3;
+  ctx.beginPath(); ctx.moveTo(rope[0].x, rope[0].y);
+  for (let i = 1; i < SEG - 1; i++) {
+    const mx = (rope[i].x + rope[i + 1].x) / 2, my = (rope[i].y + rope[i + 1].y) / 2;
+    ctx.quadraticCurveTo(rope[i].x, rope[i].y, mx, my);
+  }
+  ctx.lineTo(rope[SEG - 1].x, rope[SEG - 1].y); ctx.stroke();
+  ctx.fillStyle = '#A07A50';
+  ctx.beginPath(); ctx.arc(tx, ty, 2, 0, Math.PI * 2); ctx.fill();
+  // 羽毛
+  const p = rope[SEG - 1], q = rope[SEG - 2], a = Math.atan2(p.y - q.y, p.x - q.x);
+  const fl = clamp(fspeed / 500, 0, 1);
+  ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(a);
+  [[-0.42, '#FF8FB1'], [0.42, '#5CD6C9'], [0, '#FFD166']].forEach(([o, c], k) => {
+    ctx.save();
+    ctx.rotate(o + Math.sin(T * 22 + k * 2) * 0.14 * fl + Math.sin(T * 2.5 + k) * 0.05);
+    ctx.strokeStyle = c; ctx.lineWidth = 1;
+    for (let j = 0; j < 5; j++) {
+      const x = 9 + j * 4.5;
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x + 5, -7 + j * 0.6); ctx.moveTo(x, 0); ctx.lineTo(x + 5, 7 - j * 0.6); ctx.stroke();
+    }
+    ctx.fillStyle = c;
+    ctx.beginPath(); ctx.moveTo(2, 0); ctx.quadraticCurveTo(15, -8.5, 32, 0); ctx.quadraticCurveTo(15, 8.5, 2, 0); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+    ctx.beginPath(); ctx.moveTo(3, 0); ctx.lineTo(30, 0); ctx.stroke();
+    ctx.restore();
+  });
+  ctx.fillStyle = '#F2B33D';
+  ctx.beginPath(); ctx.arc(0, 0, 3.8, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  ctx.beginPath(); ctx.arc(-1.1, -1.2, 1.2, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+function draw(T) {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  if (DESKTOP) ctx.clearRect(0, 0, W, H);
+  else {
+    ctx.fillStyle = bgGrad; ctx.fillRect(0, 0, W, H);
+    // 模拟 Dock 作为地面
+    ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.roundRect(14, groundY, W - 28, H - groundY - 12, 16); ctx.fill(); ctx.stroke();
+  }
+  drawCat();
+  drawParts();
+  drawBubble();
+  if (DESKTOP) drawHint();
+  if (playing) drawWand(T);
+}
+
+// ---------- 品种切换 ----------
+const bar = document.getElementById('breeds');
+for (const k in BREEDS) {
+  const b = document.createElement('button');
+  b.dataset.k = k;
+  b.innerHTML = `<i style="background:${BREEDS[k].dot}"></i>${BREEDS[k].name}`;
+  b.addEventListener('click', () => setBreed(k, true));
+  bar.appendChild(b);
+}
+function setBreed(k, fx) {
+  B = BREEDS[k];
+  for (const b of bar.children) b.classList.toggle('on', b.dataset.k === k);
+  try { localStorage.setItem('cat-breed', k); } catch (e) {}
+  if (fx && cat.rig) { const w = toWorld(cat.rig.head); sparkle(w.x, w.y); }
+}
+let saved = null;
+try { saved = localStorage.getItem('cat-breed'); } catch (e) {}
+setBreed(BREEDS[saved] ? saved : 'orange', false);
+
+if (DESKTOP) {
+  window.catHost = {
+    setMouse(x, y) { mouse.x = x; mouse.y = y; },
+    setHover(h) { hover = h; },
+    setGround(y) { hostGround = y; resize(); },
+    setBreed(k) { if (BREEDS[k]) setBreed(k, true); },
+    // 收起逗猫棒：猫失去兴趣，回去发呆（扑到一半的让它落地）
+    setPlay(on) {
+      playing = on;
+      if (!on) {
+        interest = 0;
+        if (cat.state !== 'POUNCE' && cat.state !== 'SLEEP') { setState('IDLE', rnd(2, 4)); cat.sub = 'sit'; }
+      }
+    },
+  };
+}
+
+// ---------- 桌面模式：点猫开菜单 ----------
+// 外壳靠猫的范围判断鼠标是否在猫身上；悬停时（以及刚启动的几秒）在猫头顶提示可以点
+let hover = false, hintA = 0, boundsT = 0;
+function updateDesktop(dt) {
+  hintA = damp(hintA, hover || T < 8 ? 1 : 0, 8, dt);
+  boundsT -= dt;
+  if (boundsT <= 0 && window.webkit) {
+    boundsT = 0.1;
+    webkit.messageHandlers.cat.postMessage([cat.x - 48 * S, groundY - cat.y - 80 * S, 96 * S, 82 * S]);
+  }
+}
+function drawHint() {
+  if (hintA < 0.02) return;
+  const text = '点我：换品种 · 收起逗猫棒 · 退出';
+  ctx.font = '12px -apple-system, "PingFang SC", sans-serif';
+  const w = ctx.measureText(text).width + 22, h = 26;
+  const x = clamp(cat.x - w / 2, 8, W - w - 8), y = groundY - cat.y - 80 * S - h - 8;
+  ctx.save();
+  ctx.globalAlpha = hintA;
+  ctx.fillStyle = 'rgba(255,255,255,0.92)'; ctx.shadowColor = 'rgba(60,40,20,0.18)'; ctx.shadowBlur = 8;
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, 13); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#6b5b4e'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(text, x + w / 2, y + h / 2 + 0.5);
+  ctx.restore();
+}
+
+// ---------- 主循环 ----------
+let last = performance.now(), acc = 0, T = 0, tipPX = mouse.x, tipPY = mouse.y;
+cat.rig = computeRig();
+function frame(now) {
+  const dt = Math.min(0.05, Math.max(0.001, (now - last) / 1000)); last = now; T += dt;
+  // 杆尖朝向猫那一侧（带一点迟滞，免得来回翻）；翻边时竿子从头顶甩过去
+  const catDx = cat.x - mouse.x;
+  if (catDx < -60) rodSide = -1; else if (catDx > 60) rodSide = 1;
+  rodAng = damp(rodAng, rodSide < 0 ? -2.5 : -0.64, 4, dt);
+
+  acc += dt;
+  const n = Math.floor(acc / SUB); acc -= n * SUB;
+  for (let i = 1; i <= n; i++) stepRope(lerp(tipPX, mouse.x, i / n), lerp(tipPY, mouse.y, i / n));
+  tipPX = mouse.x; tipPY = mouse.y;
+
+  const f = feather();
+  fspeed = damp(fspeed, Math.hypot(f.x - f.px, f.y - f.py) / SUB, 10, dt);
+  hist.push({ t: T, x: f.x, y: f.y });
+  while (hist.length > 2 && hist[0].t < T - 1.5) hist.shift();
+  perc = sampleAt(T - REACT);
+  const old = sampleAt(T - REACT - 0.1);
+  pvel = { x: (perc.x - old.x) / 0.1, y: (perc.y - old.y) / 0.1 };
+
+  // 兴趣：羽毛动就涨，不动就慢慢降；疲劳：每扑一次涨一点
+  const gain = playing ? clamp((fspeed - 30) / 500, 0, 1) : 0;
+  interest = clamp(interest + (gain * 1.1 - (fspeed < 30 ? 0.12 : 0)) * dt * (cat.state === 'SLEEP' ? 0.5 : 1), 0, 1);
+  fatigue = Math.max(0, fatigue - (cat.state === 'BORED' ? 0.12 : 0.025) * dt);
+
+  updateCat(dt);
+  updateParts(dt);
+  if (DESKTOP) updateDesktop(dt);
+  draw(T);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
