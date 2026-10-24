@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     let breeds = [("orange", "橘猫"), ("cow", "奶牛猫"), ("calico", "三花")]
     var breed = UserDefaults.standard.string(forKey: "breed") ?? "orange"
     var playing = true
+    var soundOn = UserDefaults.standard.object(forKey: "sound") as? Bool ?? true
 
     // 有菜单栏的那块屏幕
     var screen: NSScreen { NSScreen.screens.first ?? NSScreen.main! }
@@ -31,6 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
 
         let config = WKWebViewConfiguration()
+        config.mediaTypesRequiringUserActionForPlayback = []   // 允许喵喵声、铃铛声直接播放
         config.userContentController.add(self, name: "log")
         config.userContentController.add(self, name: "cat")
         let boot = """
@@ -59,6 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         // 鼠标在猫身上时窗口才接收点击；点猫 → 弹出菜单
         NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] e in
             guard let self, e.window === self.window, self.hovering else { return e }
+            self.js("catHost.poke()")
             self.buildMenu().popUp(positioning: nil, at: e.locationInWindow, in: self.window.contentView)
             return nil
         }
@@ -67,7 +70,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         ready = true
         fitScreen()
-        js("catHost.setBreed('\(breed)'); catHost.setPlay(\(playing))")
+        js("catHost.setBreed('\(breed)'); catHost.setPlay(\(playing)); catHost.setSound(\(soundOn))")
+        // 启动时在日志里报一下声音能不能播（被系统拦住时会是 suspended）
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.js("webkit.messageHandlers.log.postMessage('audio: ' + catHost.audioState())")
+        }
     }
 
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -75,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             catRect = NSRect(x: r[0], y: r[1], width: r[2], height: r[3])
         } else {
             print(message.body)
+            fflush(stdout)
         }
     }
 
@@ -131,6 +139,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         play.state = playing ? .on : .off
         menu.addItem(play)
 
+        let sound = NSMenuItem(title: "喵喵声和铃铛声", action: #selector(toggleSound), keyEquivalent: "")
+        sound.target = self
+        sound.state = soundOn ? .on : .off
+        menu.addItem(sound)
+
         menu.addItem(.separator())
         let header = NSMenuItem(title: "品种", action: nil, keyEquivalent: "")
         header.isEnabled = false
@@ -152,6 +165,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     @objc func togglePlay() {
         playing.toggle()
         js("catHost.setPlay(\(playing))")
+        rebuildMenu()
+    }
+
+    @objc func toggleSound() {
+        soundOn.toggle()
+        UserDefaults.standard.set(soundOn, forKey: "sound")
+        js("catHost.setSound(\(soundOn))")
         rebuildMenu()
     }
 
